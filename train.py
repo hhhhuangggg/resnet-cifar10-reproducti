@@ -208,6 +208,45 @@ def build_checkpoint(
     }
 
 
+def build_paper_checkpoint(
+    *,
+    model_name: str,
+    epoch: int,
+    global_iteration: int,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    best_test_accuracy: float,
+    history: list[dict[str, object]],
+    config: dict[str, object],
+    schedule: PaperSchedule,
+) -> dict[str, object]:
+    """在通用checkpoint上增加paper iteration日程状态。"""
+
+    checkpoint = build_checkpoint(
+        model_name=model_name,
+        epoch=epoch,
+        model=model,
+        optimizer=optimizer,
+        best_test_accuracy=best_test_accuracy,
+        history=history,
+        config=config,
+    )
+    checkpoint.update(
+        {
+            "global_iteration": global_iteration,
+            "current_learning_rate": float(
+                optimizer.param_groups[0]["lr"]
+            ),
+            "schedule_state": {
+                "max_iterations": schedule.max_iterations,
+                "milestones": list(schedule.milestones),
+                "learning_rates": list(schedule.learning_rates),
+            },
+        }
+    )
+    return checkpoint
+
+
 def atomic_save_checkpoint(
     path: Path,
     checkpoint: dict[str, object],
@@ -305,6 +344,94 @@ def validate_resume_checkpoint(
         raise ValueError("checkpoint rng_state必须是字典")
 
 
+def validate_paper_resume_checkpoint(
+    checkpoint: dict[str, object],
+    args: argparse.Namespace,
+    config: dict[str, object],
+    schedule: PaperSchedule,
+) -> None:
+    """校验paper checkpoint的通用状态、iteration和学习率。"""
+
+    required = {
+        "global_iteration",
+        "current_learning_rate",
+        "schedule_state",
+    }
+    missing = required.difference(checkpoint)
+    if missing:
+        raise ValueError(f"paper checkpoint缺少字段：{sorted(missing)}")
+
+    epoch = checkpoint.get("epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int):
+        raise ValueError("paper checkpoint epoch必须是整数")
+    validate_resume_checkpoint(
+        checkpoint,
+        args.model,
+        config,
+        epoch,
+    )
+
+    global_iteration = checkpoint["global_iteration"]
+    if (
+        isinstance(global_iteration, bool)
+        or not isinstance(global_iteration, int)
+        or not 0 <= global_iteration <= schedule.max_iterations
+    ):
+        raise ValueError("paper checkpoint iteration超出日程范围")
+
+    expected_schedule_state = {
+        "max_iterations": schedule.max_iterations,
+        "milestones": list(schedule.milestones),
+        "learning_rates": list(schedule.learning_rates),
+    }
+    if checkpoint["schedule_state"] != expected_schedule_state:
+        raise ValueError("paper checkpoint日程与当前日程冲突")
+
+    history = checkpoint["history"]
+    if global_iteration == 0:
+        if history:
+            raise ValueError("iteration为0时history必须为空")
+    elif (
+        not history
+        or history[-1].get("iteration") != global_iteration
+    ):
+        raise ValueError(
+            "paper checkpoint history最后iteration与checkpoint不一致"
+        )
+
+    expected_learning_rate = schedule.learning_rate_after(global_iteration)
+    current_learning_rate = checkpoint["current_learning_rate"]
+    if (
+        not isinstance(current_learning_rate, (int, float))
+        or isinstance(current_learning_rate, bool)
+        or _normalized_learning_rate(current_learning_rate)
+        != _normalized_learning_rate(
+            expected_learning_rate
+        )
+    ):
+        raise ValueError("paper checkpoint当前学习率与日程不一致")
+
+    optimizer_state = checkpoint["optimizer_state"]
+    param_groups = optimizer_state.get("param_groups")
+    if not isinstance(param_groups, list) or not param_groups:
+        raise ValueError("paper checkpoint优化器缺少param_groups")
+    if any(
+        _normalized_learning_rate(group.get("lr", -1.0))
+        != _normalized_learning_rate(
+            expected_learning_rate
+        )
+        for group in param_groups
+        if isinstance(group, dict)
+    ):
+        raise ValueError("paper checkpoint优化器学习率与日程不一致")
+
+
+def _normalized_learning_rate(value: float) -> float:
+    """统一paper学习率到稳定的小数表示，避免浮点除法尾差。"""
+
+    return round(float(value), 12)
+
+
 def _move_optimizer_state(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -331,6 +458,28 @@ def restore_training_state(
     return (
         int(checkpoint["epoch"]) + 1,
         float(checkpoint["best_test_accuracy"]),
+        history,
+    )
+
+
+def restore_paper_training_state(
+    checkpoint: dict[str, object],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> tuple[int, int, float, list[dict[str, object]]]:
+    """恢复paper训练并同时返回全局iteration。"""
+
+    next_epoch, best_test_accuracy, history = restore_training_state(
+        checkpoint,
+        model,
+        optimizer,
+        device,
+    )
+    return (
+        next_epoch,
+        int(checkpoint["global_iteration"]),
+        best_test_accuracy,
         history,
     )
 

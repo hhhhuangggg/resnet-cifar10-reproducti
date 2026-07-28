@@ -2,18 +2,23 @@
 
 import argparse
 import csv
+import copy
 from pathlib import Path
 
 import pytest
+import torch
 
 from schedules import PaperSchedule
 from train import (
     PAPER_HISTORY_FIELDS,
     build_experiment_config,
     build_experiment_paths,
+    build_paper_checkpoint,
     build_paper_schedule,
     build_run_name,
+    restore_paper_training_state,
     validate_args,
+    validate_paper_resume_checkpoint,
     write_history,
     write_paper_learning_rate_trace,
     write_paper_tensorboard_metrics,
@@ -179,3 +184,179 @@ def test_paper_learning_rate_trace_marks_exact_boundaries() -> None:
         ("LearningRate", 0.001, 7),
     ]
     assert writer.flush_count == 1
+
+
+def _paper_checkpoint_parts() -> tuple[
+    argparse.Namespace,
+    PaperSchedule,
+    torch.nn.Module,
+    torch.optim.Optimizer,
+    dict[str, object],
+    list[dict[str, object]],
+]:
+    args = _make_args(
+        device="cpu",
+        max_iterations=64000,
+        learning_rate=0.1,
+    )
+    schedule = PaperSchedule(7, (3, 5), (0.1, 0.01, 0.001))
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=0.01,
+        momentum=0.9,
+        weight_decay=0.0001,
+    )
+    output_path, log_path = build_experiment_paths(args)
+    config = build_experiment_config(args, output_path, log_path)
+    config["training"]["max_iterations"] = 7
+    config["training"]["learning_rate_milestones"] = [3, 5]
+    config["training"]["learning_rates"] = [0.1, 0.01, 0.001]
+    history = [
+        {
+            **_paper_history_row(),
+            "epoch": 1,
+            "iteration": 4,
+            "train_batches": 4,
+            "is_partial_epoch": False,
+            "learning_rate": 0.01,
+        }
+    ]
+    return args, schedule, model, optimizer, config, history
+
+
+def test_paper_checkpoint_records_global_iteration_and_schedule() -> None:
+    args, schedule, model, optimizer, config, history = (
+        _paper_checkpoint_parts()
+    )
+
+    checkpoint = build_paper_checkpoint(
+        model_name=args.model,
+        epoch=1,
+        global_iteration=4,
+        model=model,
+        optimizer=optimizer,
+        best_test_accuracy=0.6,
+        history=history,
+        config=config,
+        schedule=schedule,
+    )
+
+    assert checkpoint["global_iteration"] == 4
+    assert checkpoint["current_learning_rate"] == pytest.approx(0.01)
+    assert checkpoint["schedule_state"] == {
+        "max_iterations": 7,
+        "milestones": [3, 5],
+        "learning_rates": [0.1, 0.01, 0.001],
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("global_iteration", 8, "iteration"),
+        (
+            "schedule_state",
+            {
+                "max_iterations": 8,
+                "milestones": [3, 5],
+                "learning_rates": [0.1, 0.01, 0.001],
+            },
+            "日程",
+        ),
+        ("current_learning_rate", 0.1, "学习率"),
+    ],
+)
+def test_paper_checkpoint_rejects_conflicting_resume_state(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    args, schedule, model, optimizer, config, history = (
+        _paper_checkpoint_parts()
+    )
+    checkpoint = build_paper_checkpoint(
+        model_name=args.model,
+        epoch=1,
+        global_iteration=4,
+        model=model,
+        optimizer=optimizer,
+        best_test_accuracy=0.6,
+        history=history,
+        config=config,
+        schedule=schedule,
+    )
+    checkpoint[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_paper_resume_checkpoint(
+            checkpoint,
+            args,
+            config,
+            schedule,
+        )
+
+
+def test_paper_checkpoint_rejects_history_iteration_mismatch() -> None:
+    args, schedule, model, optimizer, config, history = (
+        _paper_checkpoint_parts()
+    )
+    checkpoint = build_paper_checkpoint(
+        model_name=args.model,
+        epoch=1,
+        global_iteration=4,
+        model=model,
+        optimizer=optimizer,
+        best_test_accuracy=0.6,
+        history=history,
+        config=config,
+        schedule=schedule,
+    )
+    checkpoint["history"] = copy.deepcopy(history)
+    checkpoint["history"][-1]["iteration"] = 3
+
+    with pytest.raises(ValueError, match="history.*iteration"):
+        validate_paper_resume_checkpoint(
+            checkpoint,
+            args,
+            config,
+            schedule,
+        )
+
+
+def test_restore_paper_training_state_returns_next_epoch_and_iteration() -> None:
+    args, schedule, model, optimizer, config, history = (
+        _paper_checkpoint_parts()
+    )
+    original = [parameter.detach().clone() for parameter in model.parameters()]
+    checkpoint = build_paper_checkpoint(
+        model_name=args.model,
+        epoch=1,
+        global_iteration=4,
+        model=model,
+        optimizer=optimizer,
+        best_test_accuracy=0.6,
+        history=history,
+        config=config,
+        schedule=schedule,
+    )
+    for parameter in model.parameters():
+        parameter.data.zero_()
+
+    next_epoch, iteration, best, restored_history = (
+        restore_paper_training_state(
+            checkpoint,
+            model,
+            optimizer,
+            torch.device("cpu"),
+        )
+    )
+
+    assert next_epoch == 2
+    assert iteration == 4
+    assert best == pytest.approx(0.6)
+    assert restored_history == history
+    assert all(
+        torch.equal(expected, actual)
+        for expected, actual in zip(original, model.parameters())
+    )
