@@ -897,6 +897,280 @@ def _print_epoch_summary(
     )
 
 
+def _print_paper_epoch_summary(
+    row: dict[str, object],
+    max_iterations: int,
+) -> None:
+    """打印paper日程的一次完整评估摘要。"""
+
+    partial_label = (
+        "（最后部分epoch）"
+        if bool(row["is_partial_epoch"])
+        else ""
+    )
+    print(f"\nEpoch {int(row['epoch'])}{partial_label}")
+    print(
+        f"  iteration: {int(row['iteration'])}/{max_iterations}"
+    )
+    print(f"  train_batches: {int(row['train_batches'])}")
+    print(f"  train_loss: {float(row['train_loss']):.4f}")
+    print(f"  train_accuracy: {float(row['train_accuracy']) * 100:.2f}%")
+    print(f"  test_loss: {float(row['test_loss']):.4f}")
+    print(f"  test_accuracy: {float(row['test_accuracy']) * 100:.2f}%")
+    print(f"  next_learning_rate: {float(row['learning_rate']):.6f}")
+    print(f"  elapsed: {float(row['elapsed_seconds']):.2f}s")
+    print(
+        "  best_test_accuracy: "
+        f"{float(row['best_test_accuracy']) * 100:.2f}%"
+    )
+
+
+def _set_optimizer_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    learning_rate: float,
+) -> None:
+    """为优化器的全部参数组设置同一学习率。"""
+
+    for parameter_group in optimizer.param_groups:
+        parameter_group["lr"] = float(learning_rate)
+
+
+def run_paper_training(
+    args: argparse.Namespace,
+    *,
+    schedule: PaperSchedule | None = None,
+    show_progress: bool = True,
+    writer_factory: object = SummaryWriter,
+    loader_batch_limit: int | None = None,
+) -> list[dict[str, object]]:
+    """执行严格按global iteration停止的论文训练日程。"""
+
+    resolved_schedule = (
+        build_paper_schedule(args)
+        if schedule is None
+        else schedule
+    )
+    if loader_batch_limit is not None:
+        if (
+            isinstance(loader_batch_limit, bool)
+            or not isinstance(loader_batch_limit, int)
+        ):
+            raise TypeError("loader_batch_limit必须是正整数或None")
+        if loader_batch_limit <= 0:
+            raise ValueError("loader_batch_limit必须是正整数或None")
+
+    device = resolve_device(args.device)
+    set_random_seed(args.seed)
+    output_path, log_path = build_experiment_paths(args)
+    is_resume = args.resume is not None
+    prepare_experiment_directories(
+        output_path,
+        log_path,
+        resume=is_resume,
+    )
+    config = build_experiment_config(args, output_path, log_path)
+    training_config = config["training"]
+    training_config["max_iterations"] = resolved_schedule.max_iterations
+    training_config["learning_rate_milestones"] = list(
+        resolved_schedule.milestones
+    )
+    training_config["learning_rates"] = list(
+        resolved_schedule.learning_rates
+    )
+
+    if is_resume:
+        checkpoint = load_checkpoint(Path(args.resume))
+        validate_paper_resume_checkpoint(
+            checkpoint,
+            args,
+            config,
+            resolved_schedule,
+        )
+    else:
+        checkpoint = None
+        write_config(output_path / "config.yaml", config)
+
+    train_loader, test_loader = create_cifar10_loaders(
+        data_dir="data",
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        download=True,
+        pin_memory=device.type == "cuda",
+    )
+    model = create_model(args.model, num_classes=10).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = SGD(
+        model.parameters(),
+        lr=resolved_schedule.learning_rate_after(0),
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+    )
+
+    if checkpoint is None:
+        epoch = 1
+        global_iteration = 0
+        best_test_accuracy = -1.0
+        history: list[dict[str, object]] = []
+    else:
+        (
+            epoch,
+            global_iteration,
+            best_test_accuracy,
+            history,
+        ) = restore_paper_training_state(
+            checkpoint,
+            model,
+            optimizer,
+            device,
+        )
+
+    print(f"device: {device.type}")
+    if device.type == "cuda":
+        print(f"gpu: {torch.cuda.get_device_name(device)}")
+    print(f"paper iterations: {resolved_schedule.max_iterations}")
+    print(f"output: {output_path}")
+    print(f"tensorboard: {log_path}")
+
+    writer = writer_factory(log_dir=str(log_path))
+    write_paper_learning_rate_trace(writer, resolved_schedule)
+    try:
+        while not resolved_schedule.is_complete(global_iteration):
+            actual_loader_batches = len(train_loader)
+            epoch_batches = actual_loader_batches
+            if loader_batch_limit is not None:
+                epoch_batches = min(epoch_batches, loader_batch_limit)
+            max_batches = resolved_schedule.max_batches_for_epoch(
+                global_iteration,
+                epoch_batches,
+            )
+            epoch_start_iteration = global_iteration
+            _set_optimizer_learning_rate(
+                optimizer,
+                resolved_schedule.learning_rate_after(global_iteration),
+            )
+            epoch_start = time.perf_counter()
+            progress_bar, progress_callback = _make_progress_callback(
+                (
+                    f"Epoch {epoch} Paper "
+                    f"{global_iteration}/{resolved_schedule.max_iterations}"
+                ),
+                max_batches,
+                enabled=show_progress,
+            )
+
+            def on_batch_end(progress: BatchProgress) -> None:
+                nonlocal global_iteration
+                global_iteration += 1
+                if global_iteration > resolved_schedule.max_iterations:
+                    raise RuntimeError("paper训练超过max_iterations")
+                _set_optimizer_learning_rate(
+                    optimizer,
+                    resolved_schedule.learning_rate_after(global_iteration),
+                )
+                if progress_callback is not None:
+                    progress_callback(progress)
+
+            try:
+                train_metrics = train_one_epoch(
+                    model,
+                    train_loader,
+                    criterion,
+                    optimizer,
+                    device,
+                    max_batches=max_batches,
+                    on_batch_end=on_batch_end,
+                )
+            finally:
+                if progress_bar is not None:
+                    progress_bar.close()
+
+            completed_this_epoch = (
+                global_iteration - epoch_start_iteration
+            )
+            if completed_this_epoch != train_metrics.batches:
+                raise RuntimeError(
+                    "global iteration增量与实际训练batch数不一致"
+                )
+
+            test_metrics = evaluate(
+                model,
+                test_loader,
+                criterion,
+                device,
+            )
+            elapsed_seconds = time.perf_counter() - epoch_start
+            improved = test_metrics.accuracy > best_test_accuracy
+            if improved:
+                best_test_accuracy = test_metrics.accuracy
+            row: dict[str, object] = {
+                "epoch": epoch,
+                "iteration": global_iteration,
+                "train_batches": train_metrics.batches,
+                "is_partial_epoch": train_metrics.batches < epoch_batches,
+                "train_loss": train_metrics.loss,
+                "train_accuracy": train_metrics.accuracy,
+                "test_loss": test_metrics.loss,
+                "test_accuracy": test_metrics.accuracy,
+                "learning_rate": resolved_schedule.learning_rate_after(
+                    global_iteration
+                ),
+                "elapsed_seconds": elapsed_seconds,
+                "best_test_accuracy": best_test_accuracy,
+            }
+            history.append(row)
+            write_history(
+                output_path / "history.csv",
+                history,
+                fields=PAPER_HISTORY_FIELDS,
+            )
+            write_paper_tensorboard_metrics(writer, row)
+            current_checkpoint = build_paper_checkpoint(
+                model_name=args.model,
+                epoch=epoch,
+                global_iteration=global_iteration,
+                model=model,
+                optimizer=optimizer,
+                best_test_accuracy=best_test_accuracy,
+                history=history,
+                config=config,
+                schedule=resolved_schedule,
+            )
+            atomic_save_checkpoint(
+                output_path / "latest.pt",
+                current_checkpoint,
+            )
+            if improved:
+                atomic_save_checkpoint(
+                    output_path / "best.pt",
+                    current_checkpoint,
+                )
+            _print_paper_epoch_summary(
+                row,
+                resolved_schedule.max_iterations,
+            )
+            epoch += 1
+    except KeyboardInterrupt:
+        print(
+            "\n训练已中断；磁盘保留上一个完成评估的paper checkpoint。"
+        )
+        if history:
+            print(
+                "恢复命令：python train.py "
+                f"--model {args.model} --schedule paper "
+                f'--resume "{output_path / "latest.pt"}"'
+            )
+        else:
+            print("第一轮尚未完成，没有checkpoint，请重新开始。")
+    finally:
+        writer.close()
+
+    if resolved_schedule.is_complete(global_iteration):
+        print("\npaper训练完成")
+        print(f"global iteration: {global_iteration}")
+        print(f"最佳测试准确率: {best_test_accuracy * 100:.2f}%")
+    return history
+
+
 def run_training(
     args: argparse.Namespace,
     *,
@@ -906,10 +1180,13 @@ def run_training(
 ) -> list[dict[str, object]]:
     """执行short日程训练，并保存每个完整epoch的全部实验状态。"""
 
-    if args.schedule != "short":
-        raise ValueError(
-            "paper 64k iteration日程将在后续正式复现阶段实现"
+    if args.schedule == "paper":
+        return run_paper_training(
+            args,
+            show_progress=show_progress,
         )
+    if args.schedule != "short":
+        raise ValueError(f"不支持的训练日程：{args.schedule}")
 
     device = resolve_device(args.device)
     set_random_seed(args.seed)

@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import torch
 
+import train
+from engine import BatchProgress, EpochMetrics
 from schedules import PaperSchedule
 from train import (
     PAPER_HISTORY_FIELDS,
@@ -16,7 +18,9 @@ from train import (
     build_paper_checkpoint,
     build_paper_schedule,
     build_run_name,
+    load_checkpoint,
     restore_paper_training_state,
+    run_paper_training,
     validate_args,
     validate_paper_resume_checkpoint,
     write_history,
@@ -102,15 +106,20 @@ def test_paper_arguments_require_both_learning_rate_milestones(
 
 
 class FakeWriter:
-    def __init__(self) -> None:
+    def __init__(self, log_dir: str | None = None) -> None:
+        self.log_dir = log_dir
         self.scalars: list[tuple[str, float, int]] = []
         self.flush_count = 0
+        self.closed = False
 
     def add_scalar(self, tag: str, value: float, step: int) -> None:
         self.scalars.append((tag, value, step))
 
     def flush(self) -> None:
         self.flush_count += 1
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _paper_history_row() -> dict[str, object]:
@@ -360,3 +369,200 @@ def test_restore_paper_training_state_returns_next_epoch_and_iteration() -> None
         torch.equal(expected, actual)
         for expected, actual in zip(original, model.parameters())
     )
+
+
+def _paper_run_args(tmp_path: Path, **overrides: object) -> argparse.Namespace:
+    values: dict[str, object] = {
+        **vars(_make_args(device="cpu")),
+        "run_name": "paper_integration",
+        "output_dir": str(tmp_path / "outputs"),
+        "log_dir": str(tmp_path / "runs"),
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_paper_training_stops_exactly_and_marks_partial_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = PaperSchedule(7, (3, 5), (0.1, 0.01, 0.001))
+    learning_rates_used: list[float] = []
+    evaluate_results = iter(
+        [
+            EpochMetrics(1.0, 0.5, 5, 10, 1),
+            EpochMetrics(0.8, 0.6, 6, 10, 1),
+        ]
+    )
+
+    monkeypatch.setattr(
+        train,
+        "create_cifar10_loaders",
+        lambda **kwargs: (list(range(4)), ["test"]),
+    )
+    monkeypatch.setattr(
+        train,
+        "create_model",
+        lambda name, num_classes=10: torch.nn.Linear(2, 2),
+    )
+
+    def fake_train_one_epoch(
+        model: torch.nn.Module,
+        data_loader: object,
+        criterion: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+        max_batches: int | None = None,
+        on_batch_end: object | None = None,
+    ) -> EpochMetrics:
+        assert max_batches is not None
+        for batch in range(1, max_batches + 1):
+            learning_rates_used.append(optimizer.param_groups[0]["lr"])
+            on_batch_end(
+                BatchProgress(
+                    batch=batch,
+                    loss=1.0,
+                    accuracy=0.5,
+                    correct=batch,
+                    samples=batch * 2,
+                )
+            )
+        return EpochMetrics(
+            loss=1.0,
+            accuracy=0.5,
+            correct=max_batches,
+            samples=max_batches * 2,
+            batches=max_batches,
+        )
+
+    monkeypatch.setattr(train, "train_one_epoch", fake_train_one_epoch)
+    monkeypatch.setattr(
+        train,
+        "evaluate",
+        lambda *args, **kwargs: next(evaluate_results),
+    )
+    writer = FakeWriter()
+
+    history = run_paper_training(
+        _paper_run_args(tmp_path),
+        schedule=schedule,
+        show_progress=False,
+        writer_factory=lambda **kwargs: writer,
+    )
+
+    assert learning_rates_used == pytest.approx(
+        [0.1, 0.1, 0.1, 0.01, 0.01, 0.001, 0.001]
+    )
+    assert [row["iteration"] for row in history] == [4, 7]
+    assert [row["train_batches"] for row in history] == [4, 3]
+    assert [row["is_partial_epoch"] for row in history] == [False, True]
+    output = tmp_path / "outputs" / "resnet20" / "paper_integration"
+    assert load_checkpoint(output / "latest.pt")["global_iteration"] == 7
+    assert load_checkpoint(output / "best.pt")["global_iteration"] == 7
+    assert writer.closed is True
+    metric_steps = [
+        step
+        for tag, _, step in writer.scalars
+        if tag == "Accuracy/test"
+    ]
+    assert metric_steps == [4, 7]
+
+
+def test_paper_training_resumes_from_last_evaluated_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = PaperSchedule(7, (3, 5), (0.1, 0.01, 0.001))
+    args = _paper_run_args(tmp_path)
+    monkeypatch.setattr(
+        train,
+        "create_cifar10_loaders",
+        lambda **kwargs: (list(range(4)), ["test"]),
+    )
+    monkeypatch.setattr(
+        train,
+        "create_model",
+        lambda name, num_classes=10: torch.nn.Linear(2, 2),
+    )
+    monkeypatch.setattr(
+        train,
+        "evaluate",
+        lambda *args, **kwargs: EpochMetrics(0.8, 0.6, 6, 10, 1),
+    )
+
+    train_calls = 0
+
+    def interrupt_on_second_epoch(
+        model: torch.nn.Module,
+        data_loader: object,
+        criterion: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+        max_batches: int | None = None,
+        on_batch_end: object | None = None,
+    ) -> EpochMetrics:
+        nonlocal train_calls
+        train_calls += 1
+        if train_calls == 2:
+            raise KeyboardInterrupt
+        assert max_batches == 4
+        for batch in range(1, 5):
+            on_batch_end(BatchProgress(batch, 1.0, 0.5, batch, batch * 2))
+        return EpochMetrics(1.0, 0.5, 4, 8, 4)
+
+    monkeypatch.setattr(
+        train,
+        "train_one_epoch",
+        interrupt_on_second_epoch,
+    )
+    first_writer = FakeWriter()
+
+    interrupted_history = run_paper_training(
+        args,
+        schedule=schedule,
+        show_progress=False,
+        writer_factory=lambda **kwargs: first_writer,
+    )
+
+    output = tmp_path / "outputs" / "resnet20" / "paper_integration"
+    latest_path = output / "latest.pt"
+    assert [row["iteration"] for row in interrupted_history] == [4]
+    assert load_checkpoint(latest_path)["global_iteration"] == 4
+    assert first_writer.closed is True
+
+    resumed_learning_rates: list[float] = []
+
+    def finish_partial_epoch(
+        model: torch.nn.Module,
+        data_loader: object,
+        criterion: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+        max_batches: int | None = None,
+        on_batch_end: object | None = None,
+    ) -> EpochMetrics:
+        assert max_batches == 3
+        for batch in range(1, 4):
+            resumed_learning_rates.append(optimizer.param_groups[0]["lr"])
+            on_batch_end(BatchProgress(batch, 1.0, 0.5, batch, batch * 2))
+        return EpochMetrics(1.0, 0.5, 3, 6, 3)
+
+    monkeypatch.setattr(train, "train_one_epoch", finish_partial_epoch)
+    resume_args = _paper_run_args(
+        tmp_path,
+        run_name=None,
+        resume=str(latest_path),
+    )
+    second_writer = FakeWriter()
+
+    resumed_history = run_paper_training(
+        resume_args,
+        schedule=schedule,
+        show_progress=False,
+        writer_factory=lambda **kwargs: second_writer,
+    )
+
+    assert resumed_learning_rates == pytest.approx([0.01, 0.001, 0.001])
+    assert [row["iteration"] for row in resumed_history] == [4, 7]
+    assert load_checkpoint(latest_path)["global_iteration"] == 7
+    assert second_writer.closed is True
