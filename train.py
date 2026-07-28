@@ -614,7 +614,7 @@ def parse_args() -> argparse.Namespace:
         "--epochs",
         type=int,
         default=5,
-        help="训练轮数，预实验默认5轮",
+        help="short日程训练轮数，默认5；paper日程忽略此参数",
     )
 
     parser.add_argument(
@@ -662,7 +662,7 @@ def parse_args() -> argparse.Namespace:
         "--run-name",
         type=str,
         default=None,
-        help="实验名称；不指定时根据seed和epochs自动生成",
+        help="实验名称；不指定时根据seed和所选日程自动生成",
     )
 
     parser.add_argument(
