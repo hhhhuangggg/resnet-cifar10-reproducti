@@ -17,6 +17,7 @@ runs/
 
 # 只用于连通性验证的冒烟实验
 outputs/*/stage7_smoke/
+outputs/*/stage8_paper_smoke/
 
 # 本地Codex辅助目录
 .agents/
@@ -27,4 +28,3 @@ arXiv-1512.03385v1.tar/
 *.tar
 *.tar.gz
 *.exe
-
