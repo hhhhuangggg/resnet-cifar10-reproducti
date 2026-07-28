@@ -394,13 +394,8 @@ def test_main_calls_run_training_once(
     assert calls == [args]
 
 
-def test_validate_args_rejects_paper_schedule_before_training(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_validate_args_accepts_implemented_paper_schedule() -> None:
     parser = argparse.ArgumentParser()
     args = _run_args(Path("."), schedule="paper")
 
-    with pytest.raises(SystemExit):
-        validate_args(parser, args)
-
-    assert "paper 64k iteration" in capsys.readouterr().err
+    validate_args(parser, args)

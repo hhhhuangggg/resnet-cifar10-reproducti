@@ -30,6 +30,7 @@ import yaml
 from data import create_cifar10_loaders
 from engine import BatchProgress, evaluate, train_one_epoch
 from models import MODEL_CONFIGS, SUPPORTED_MODELS, create_model
+from schedules import PaperSchedule
 
 HISTORY_FIELDS = [
     "epoch",
@@ -356,10 +357,6 @@ def validate_args(
             )
     if args.max_iterations <= 0:
         parser.error("--max-iterations必须大于0")
-    if args.schedule == "paper":
-        parser.error(
-            "paper 64k iteration日程将在后续正式复现阶段实现"
-        )
     if (
         args.schedule == "paper"
         and args.max_iterations <= 48000
@@ -521,6 +518,22 @@ def build_run_name(args: argparse.Namespace) -> str:
         )
 
     return f"seed{args.seed}_{args.epochs}epochs"
+
+
+def build_paper_schedule(args: argparse.Namespace) -> PaperSchedule:
+    """根据命令行初始学习率构造论文iteration日程。"""
+
+    return PaperSchedule(
+        max_iterations=args.max_iterations,
+        milestones=(32000, 48000),
+        learning_rates=(
+            args.learning_rate,
+            args.learning_rate / 10,
+            args.learning_rate / 100,
+        ),
+    )
+
+
 def build_experiment_paths(
     args: argparse.Namespace,
 ) -> tuple[Path, Path]:
@@ -592,6 +605,11 @@ def build_experiment_config(
                 [32000, 48000]
                 if args.schedule == "paper"
                 else []
+            ),
+            "learning_rates": (
+                list(build_paper_schedule(args).learning_rates)
+                if args.schedule == "paper"
+                else [args.learning_rate]
             ),
             "batch_size": args.batch_size,
             "optimizer": "sgd",
