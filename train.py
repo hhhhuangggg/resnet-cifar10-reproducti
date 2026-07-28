@@ -32,8 +32,23 @@ from engine import BatchProgress, evaluate, train_one_epoch
 from models import MODEL_CONFIGS, SUPPORTED_MODELS, create_model
 from schedules import PaperSchedule
 
-HISTORY_FIELDS = [
+SHORT_HISTORY_FIELDS = [
     "epoch",
+    "train_loss",
+    "train_accuracy",
+    "test_loss",
+    "test_accuracy",
+    "learning_rate",
+    "elapsed_seconds",
+    "best_test_accuracy",
+]
+HISTORY_FIELDS = SHORT_HISTORY_FIELDS
+
+PAPER_HISTORY_FIELDS = [
+    "epoch",
+    "iteration",
+    "train_batches",
+    "is_partial_epoch",
     "train_loss",
     "train_accuracy",
     "test_loss",
@@ -63,13 +78,15 @@ def write_config(path: Path, config: dict[str, object]) -> None:
 def write_history(
     path: Path,
     history: list[dict[str, object]],
+    *,
+    fields: list[str] = SHORT_HISTORY_FIELDS,
 ) -> None:
     """以固定字段原子重写完整epoch历史。"""
 
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
         buffer,
-        fieldnames=HISTORY_FIELDS,
+        fieldnames=fields,
         lineterminator="\n",
     )
     writer.writeheader()
@@ -94,6 +111,44 @@ def write_tensorboard_metrics(
     )
     for tag, value in metrics:
         writer.add_scalar(tag, float(value), epoch)
+    writer.flush()
+
+
+def write_paper_tensorboard_metrics(
+    writer: object,
+    row: dict[str, object],
+) -> None:
+    """以全局iteration为横轴写入paper评估指标。"""
+
+    step = int(row["iteration"])
+    metrics = (
+        ("Loss/train", row["train_loss"]),
+        ("Loss/test", row["test_loss"]),
+        ("Accuracy/train", row["train_accuracy"]),
+        ("Accuracy/test", row["test_accuracy"]),
+        ("Time/epoch_seconds", row["elapsed_seconds"]),
+        ("Progress/epoch", row["epoch"]),
+    )
+    for tag, value in metrics:
+        writer.add_scalar(tag, float(value), step)
+    writer.flush()
+
+
+def write_paper_learning_rate_trace(
+    writer: object,
+    schedule: PaperSchedule,
+) -> None:
+    """在起点、里程碑和终点记录paper学习率阶梯。"""
+
+    first, second = schedule.milestones
+    points = (
+        (0, schedule.learning_rates[0]),
+        (first, schedule.learning_rates[1]),
+        (second, schedule.learning_rates[2]),
+        (schedule.max_iterations, schedule.learning_rates[2]),
+    )
+    for step, learning_rate in points:
+        writer.add_scalar("LearningRate", float(learning_rate), step)
     writer.flush()
 
 
