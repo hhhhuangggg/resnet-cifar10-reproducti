@@ -1,0 +1,30 @@
+# Python生成文件
+__pycache__/
+*.py[cod]
+
+# pytest临时文件
+.pytest_cache/
+.pytest-tmp/
+
+# CIFAR-10数据和均值缓存
+data/
+
+# TensorBoard事件日志
+runs/
+
+# PyTorch模型与训练恢复点
+*.pt
+
+# 只用于连通性验证的冒烟实验
+outputs/*/stage7_smoke/
+
+# 本地Codex辅助目录
+.agents/
+
+# 论文下载包、解压目录和安装程序
+1512.03385v1.pdf
+arXiv-1512.03385v1.tar/
+*.tar
+*.tar.gz
+*.exe
+
