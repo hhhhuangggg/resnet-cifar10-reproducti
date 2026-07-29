@@ -1,9 +1,14 @@
 """验证、汇总并绘制CIFAR-10论文复现实验结果。"""
+import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+import matplotlib
 import yaml
+
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt
 
 
 REQUIRED_HISTORY_FIELDS = {
@@ -27,6 +32,22 @@ EXPECTED_TRAINING = {
     "learning_rates": [0.1, 0.01, 0.001],
     "batch_size": 128,
     "seed": 42,
+}
+
+
+MODELS = ("plain20", "resnet20", "plain56", "resnet56")
+PARAMETERS = {
+    "plain20": 269_722,
+    "resnet20": 269_722,
+    "plain56": 853_018,
+    "resnet56": 853_018,
+}
+PAPER_TEST_ERRORS = {"resnet20": 8.75, "resnet56": 6.97}
+COLORS = {
+    "plain20": "#0072B2",
+    "resnet20": "#009E73",
+    "plain56": "#D55E00",
+    "resnet56": "#CC79A7",
 }
 
 
@@ -278,3 +299,180 @@ def write_summary_csv(
             writer.writerow(row)
 
     temporary.replace(resolved)
+
+
+def plot_error_curves(
+    histories: dict[str, list[HistoryRow]],
+    path: str | Path,
+) -> None:
+    """绘制四组实验未经平滑的训练和测试错误率曲线。"""
+
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    figure, axes = plt.subplots(2, 1, figsize=(12, 8), dpi=160)
+
+    for model in MODELS:
+        rows = histories[model]
+        iterations = [row.iteration for row in rows]
+        train_errors = [
+            100.0 * (1.0 - row.train_accuracy) for row in rows
+        ]
+        test_errors = [
+            100.0 * (1.0 - row.test_accuracy) for row in rows
+        ]
+        axes[0].plot(
+            iterations,
+            train_errors,
+            label=model,
+            color=COLORS[model],
+            linewidth=1.8,
+        )
+        axes[1].plot(
+            iterations,
+            test_errors,
+            label=model,
+            color=COLORS[model],
+            linewidth=1.8,
+        )
+
+    for axis, title in zip(
+        axes,
+        ("Training error", "Test error"),
+    ):
+        axis.axvline(
+            32_000,
+            color="#888888",
+            linestyle="--",
+            linewidth=1,
+            label="LR milestone" if axis is axes[0] else None,
+        )
+        axis.axvline(
+            48_000,
+            color="#888888",
+            linestyle="--",
+            linewidth=1,
+        )
+        axis.axvline(
+            64_000,
+            color="#222222",
+            linestyle=":",
+            linewidth=1,
+            label="Training end" if axis is axes[0] else None,
+        )
+        axis.set_title(title)
+        axis.set_xlabel("Iteration")
+        axis.set_ylabel("Error (%)")
+        axis.grid(alpha=0.25)
+        axis.legend(ncol=3)
+
+    figure.suptitle("CIFAR-10 PlainNet vs ResNet (64k schedule)")
+    figure.tight_layout()
+    figure.savefig(resolved, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_paper_comparison(
+    summaries: list[ExperimentSummary],
+    path: str | Path,
+) -> None:
+    """对比ResNet-20/56论文错误率与本次复现最佳错误率。"""
+
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    summary_by_model = {summary.model: summary for summary in summaries}
+    models = ("resnet20", "resnet56")
+    paper_values = [PAPER_TEST_ERRORS[model] for model in models]
+    reproduced_values = [
+        summary_by_model[model].best_test_error_percent
+        for model in models
+    ]
+    positions = range(len(models))
+    width = 0.36
+
+    figure, axis = plt.subplots(figsize=(8, 5), dpi=160)
+    paper_bars = axis.bar(
+        [position - width / 2 for position in positions],
+        paper_values,
+        width,
+        label="Paper",
+        color="#999999",
+    )
+    reproduced_bars = axis.bar(
+        [position + width / 2 for position in positions],
+        reproduced_values,
+        width,
+        label="Reproduction",
+        color=[COLORS[model] for model in models],
+    )
+    axis.set_xticks(list(positions), ["ResNet-20", "ResNet-56"])
+    axis.set_ylabel("Best test error (%)")
+    axis.set_title("CIFAR-10 paper comparison")
+    axis.legend()
+    axis.grid(axis="y", alpha=0.25)
+    axis.bar_label(paper_bars, fmt="%.2f%%", padding=3)
+    axis.bar_label(reproduced_bars, fmt="%.2f%%", padding=3)
+    upper = max(paper_values + reproduced_values)
+    axis.set_ylim(0, upper * 1.18)
+    figure.tight_layout()
+    figure.savefig(resolved, bbox_inches="tight")
+    plt.close(figure)
+
+
+def run_analysis(
+    results_root: str | Path,
+    output_dir: str | Path,
+) -> list[ExperimentSummary]:
+    """校验四组正式实验并生成汇总表与图。"""
+
+    root = Path(results_root)
+    destination = Path(output_dir)
+    histories: dict[str, list[HistoryRow]] = {}
+    summaries: list[ExperimentSummary] = []
+
+    for model in MODELS:
+        experiment = root / model / "seed42_paper64k"
+        config = load_config(experiment / "config.yaml")
+        validate_experiment_config(config, model)
+        history = load_history(experiment / "history.csv")
+        histories[model] = history
+        summaries.append(
+            summarize_experiment(model, history, PARAMETERS[model])
+        )
+
+    write_summary_csv(summaries, destination / "cifar_summary.csv")
+    plot_error_curves(histories, destination / "cifar_error_curves.png")
+    plot_paper_comparison(
+        summaries,
+        destination / "paper_comparison.png",
+    )
+    return summaries
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="校验并分析四组CIFAR-10正式64k实验",
+    )
+    parser.add_argument(
+        "--results-root",
+        type=Path,
+        required=True,
+        help="包含plain20/resnet20/plain56/resnet56的outputs目录",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("analysis/results"),
+        help="汇总CSV和PNG图表的输出目录",
+    )
+    args = parser.parse_args()
+
+    summaries = run_analysis(args.results_root, args.output_dir)
+    for summary in summaries:
+        print(
+            f"{summary.model} "
+            f"best_test_error={summary.best_test_error_percent:.2f}%"
+        )
+
+
+if __name__ == "__main__":
+    main()

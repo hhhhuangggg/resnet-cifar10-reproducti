@@ -8,6 +8,7 @@ import yaml
 from analysis.compare_cifar_results import (
     load_config,
     load_history,
+    run_analysis,
     summarize_experiment,
     validate_experiment_config,
     write_summary_csv,
@@ -203,3 +204,36 @@ def test_write_summary_csv_uses_fixed_header(tmp_path: Path) -> None:
         "final_test_accuracy_percent,final_test_error_percent,"
         "total_minutes,completed_iterations"
     )
+
+
+def write_experiment(root: Path, model: str) -> None:
+    experiment = root / model / "seed42_paper64k"
+    write_history(experiment / "history.csv", completed_rows())
+    (experiment / "config.yaml").write_text(
+        yaml.safe_dump(valid_config(model), sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def test_run_analysis_creates_all_artifacts(tmp_path: Path) -> None:
+    results_root = tmp_path / "outputs"
+    for model in ("plain20", "resnet20", "plain56", "resnet56"):
+        write_experiment(results_root, model)
+    output_dir = tmp_path / "analysis-results"
+
+    summaries = run_analysis(results_root, output_dir)
+
+    assert [summary.model for summary in summaries] == [
+        "plain20",
+        "resnet20",
+        "plain56",
+        "resnet56",
+    ]
+    for filename in (
+        "cifar_summary.csv",
+        "cifar_error_curves.png",
+        "paper_comparison.png",
+    ):
+        artifact = output_dir / filename
+        assert artifact.is_file()
+        assert artifact.stat().st_size > 0
