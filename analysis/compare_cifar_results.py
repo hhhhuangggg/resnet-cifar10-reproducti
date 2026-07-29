@@ -47,6 +47,40 @@ class HistoryRow:
     best_test_accuracy: float
 
 
+@dataclass(frozen=True)
+class ExperimentSummary:
+    """一组完整64k实验的关键指标。"""
+
+    model: str
+    parameters: int
+    best_epoch: int
+    best_iteration: int
+    best_test_accuracy_percent: float
+    best_test_error_percent: float
+    final_train_accuracy_percent: float
+    final_train_error_percent: float
+    final_test_accuracy_percent: float
+    final_test_error_percent: float
+    total_minutes: float
+    completed_iterations: int
+
+
+SUMMARY_FIELDS = [
+    "model",
+    "parameters",
+    "best_epoch",
+    "best_iteration",
+    "best_test_accuracy_percent",
+    "best_test_error_percent",
+    "final_train_accuracy_percent",
+    "final_train_error_percent",
+    "final_test_accuracy_percent",
+    "final_test_error_percent",
+    "total_minutes",
+    "completed_iterations",
+]
+
+
 def _parse_bool(value: str, *, field: str, line: int) -> bool:
     normalized = value.strip().lower()
     if normalized == "true":
@@ -187,3 +221,60 @@ def validate_experiment_config(
             raise ValueError(
                 f"training.{field}期望为{expected!r}，实际为{actual!r}"
             )
+
+
+def summarize_experiment(
+    model: str,
+    rows: list[HistoryRow],
+    parameters: int,
+) -> ExperimentSummary:
+    """分别汇总最佳测试点与训练结束点。"""
+
+    if not rows:
+        raise ValueError("实验记录不能为空")
+    if parameters <= 0:
+        raise ValueError("parameters必须大于0")
+
+    best = max(rows, key=lambda row: row.test_accuracy)
+    final = rows[-1]
+    return ExperimentSummary(
+        model=model,
+        parameters=parameters,
+        best_epoch=best.epoch,
+        best_iteration=best.iteration,
+        best_test_accuracy_percent=100.0 * best.test_accuracy,
+        best_test_error_percent=100.0 * (1.0 - best.test_accuracy),
+        final_train_accuracy_percent=100.0 * final.train_accuracy,
+        final_train_error_percent=100.0 * (1.0 - final.train_accuracy),
+        final_test_accuracy_percent=100.0 * final.test_accuracy,
+        final_test_error_percent=100.0 * (1.0 - final.test_accuracy),
+        total_minutes=sum(row.elapsed_seconds for row in rows) / 60.0,
+        completed_iterations=final.iteration,
+    )
+
+
+def write_summary_csv(
+    summaries: list[ExperimentSummary],
+    path: str | Path,
+) -> None:
+    """使用固定列顺序和临时文件原子写入汇总结果。"""
+
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    temporary = resolved.with_suffix(resolved.suffix + ".tmp")
+
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_FIELDS)
+        writer.writeheader()
+        for summary in summaries:
+            row: dict[str, object] = {}
+            for field in SUMMARY_FIELDS:
+                value = getattr(summary, field)
+                row[field] = (
+                    f"{value:.6f}"
+                    if isinstance(value, float)
+                    else value
+                )
+            writer.writerow(row)
+
+    temporary.replace(resolved)

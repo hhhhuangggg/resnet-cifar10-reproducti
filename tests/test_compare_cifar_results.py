@@ -8,7 +8,9 @@ import yaml
 from analysis.compare_cifar_results import (
     load_config,
     load_history,
+    summarize_experiment,
     validate_experiment_config,
+    write_summary_csv,
 )
 
 
@@ -157,3 +159,47 @@ def test_config_rejects_unfair_setting(
 
     with pytest.raises(ValueError, match=field):
         validate_experiment_config(config, "plain20")
+
+
+def test_summary_keeps_best_and_final_separate(tmp_path: Path) -> None:
+    path = tmp_path / "history.csv"
+    rows = completed_rows()
+    rows[0]["test_accuracy"] = 0.92
+    rows[0]["best_test_accuracy"] = 0.92
+    rows[-1]["test_accuracy"] = 0.91
+    rows[-1]["best_test_accuracy"] = 0.92
+    write_history(path, rows)
+
+    summary = summarize_experiment(
+        "plain20",
+        load_history(path),
+        269722,
+    )
+
+    assert summary.best_test_error_percent == pytest.approx(8.0)
+    assert summary.final_test_error_percent == pytest.approx(9.0)
+    assert summary.final_train_error_percent == pytest.approx(2.0)
+    assert summary.best_iteration == 391
+    assert summary.total_minutes == pytest.approx(35.0 / 60.0)
+
+
+def test_write_summary_csv_uses_fixed_header(tmp_path: Path) -> None:
+    path = tmp_path / "history.csv"
+    write_history(path, completed_rows())
+    summary = summarize_experiment(
+        "plain20",
+        load_history(path),
+        269722,
+    )
+    output = tmp_path / "summary.csv"
+
+    write_summary_csv([summary], output)
+
+    header = output.read_text(encoding="utf-8").splitlines()[0]
+    assert header == (
+        "model,parameters,best_epoch,best_iteration,"
+        "best_test_accuracy_percent,best_test_error_percent,"
+        "final_train_accuracy_percent,final_train_error_percent,"
+        "final_test_accuracy_percent,final_test_error_percent,"
+        "total_minutes,completed_iterations"
+    )
