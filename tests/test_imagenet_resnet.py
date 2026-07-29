@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import pytest
 import torch
+import torchvision.models as tv_models
 from torch import nn
 
 from models.imagenet_resnet import (
@@ -115,3 +116,54 @@ def test_factory_rejects_invalid_num_classes(num_classes: object) -> None:
 
     with pytest.raises((TypeError, ValueError)):
         resnet18(num_classes=num_classes)
+
+
+@pytest.mark.parametrize(
+    ("ours", "reference", "expected_parameters"),
+    [
+        (resnet18, tv_models.resnet18, 11_689_512),
+        (resnet34, tv_models.resnet34, 21_797_672),
+        (resnet50, tv_models.resnet50, 25_557_032),
+        (resnet101, tv_models.resnet101, 44_549_160),
+        (resnet152, tv_models.resnet152, 60_192_808),
+    ],
+)
+def test_parameter_counts_match_torchvision(
+    ours: Callable[..., ImageNetResNet],
+    reference: Callable[..., nn.Module],
+    expected_parameters: int,
+) -> None:
+    """遗漏卷积、projection或分类层时，本测试应当失败。"""
+
+    our_model = ours()
+    reference_model = reference(weights=None)
+
+    our_parameters = sum(
+        parameter.numel()
+        for parameter in our_model.parameters()
+    )
+    reference_parameters = sum(
+        parameter.numel()
+        for parameter in reference_model.parameters()
+    )
+
+    assert our_parameters == expected_parameters
+    assert our_parameters == reference_parameters
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [resnet18, resnet34, resnet50, resnet101, resnet152],
+)
+def test_imagenet_models_meta_forward(
+    factory: Callable[..., ImageNetResNet],
+) -> None:
+    """尺寸传播或分类输出错误时，本测试应当失败。"""
+
+    model = factory(num_classes=17).to(device="meta")
+    x = torch.empty(1, 3, 224, 224, device="meta")
+
+    output = model(x)
+
+    assert output.shape == (1, 17)
+    assert output.device.type == "meta"
