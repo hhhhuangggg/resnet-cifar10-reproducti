@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 
-from models.imagenet_resnet import BasicBlock, conv1x1
+from models.imagenet_resnet import BasicBlock, Bottleneck, conv1x1
 
 
 def test_basic_block_identity_preserves_shape() -> None:
@@ -38,3 +38,24 @@ def test_basic_block_projection_changes_shape() -> None:
     assert block.conv1.kernel_size == (3, 3)
     assert block.conv1.stride == (2, 2)
     assert block.conv2.stride == (1, 1)
+
+
+def test_bottleneck_uses_paper_stride_placement() -> None:
+    """stride离开论文规定的第一个1x1卷积时，本测试应当失败。"""
+
+    downsample = nn.Sequential(
+        conv1x1(256, 512, stride=2),
+        nn.BatchNorm2d(512),
+    )
+    block = Bottleneck(256, 128, stride=2, downsample=downsample)
+    block.eval()
+    x = torch.randn(2, 256, 16, 16)
+
+    with torch.no_grad():
+        output = block(x)
+
+    assert Bottleneck.expansion == 4
+    assert block.conv1.stride == (2, 2)
+    assert block.conv2.stride == (1, 1)
+    assert block.conv3.out_channels == 512
+    assert output.shape == (2, 512, 8, 8)

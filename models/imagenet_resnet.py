@@ -72,3 +72,42 @@ class BasicBlock(nn.Module):
 
         output = output + identity
         return self.relu(output)
+
+
+class Bottleneck(nn.Module):
+    """ResNet-50/101/152使用的三层瓶颈残差块。"""
+
+    expansion = 4
+
+    def __init__(
+        self,
+        in_channels: int,
+        channels: int,
+        stride: int = 1,
+        downsample: nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        expanded_channels = channels * self.expansion
+        self.conv1 = conv1x1(in_channels, channels, stride)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = conv3x3(channels, channels)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.conv3 = conv1x1(channels, expanded_channels)
+        self.bn3 = nn.BatchNorm2d(expanded_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """计算论文版Bottleneck的残差映射。"""
+
+        identity = x
+
+        output = self.relu(self.bn1(self.conv1(x)))
+        output = self.relu(self.bn2(self.conv2(output)))
+        output = self.bn3(self.conv3(output))
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        output = output + identity
+        return self.relu(output)
