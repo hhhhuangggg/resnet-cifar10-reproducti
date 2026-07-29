@@ -3,8 +3,13 @@ import csv
 from pathlib import Path
 
 import pytest
+import yaml
 
-from analysis.compare_cifar_results import load_history
+from analysis.compare_cifar_results import (
+    load_config,
+    load_history,
+    validate_experiment_config,
+)
 
 
 FIELDS = [
@@ -69,6 +74,20 @@ def completed_rows() -> list[dict[str, object]]:
     ]
 
 
+def valid_config(model: str = "plain20") -> dict[str, object]:
+    return {
+        "model": {"name": model},
+        "training": {
+            "schedule": "paper",
+            "max_iterations": 64000,
+            "learning_rate_milestones": [32000, 48000],
+            "learning_rates": [0.1, 0.01, 0.001],
+            "batch_size": 128,
+            "seed": 42,
+        },
+    }
+
+
 def test_load_history_parses_completed_run(tmp_path: Path) -> None:
     """数值或布尔字段解析错误时，本测试应当失败。"""
 
@@ -103,3 +122,38 @@ def test_load_history_rejects_unfinished_run(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="64000"):
         load_history(path)
+
+
+def test_config_accepts_paper_schedule(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(valid_config(), sort_keys=False),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+    validate_experiment_config(config, "plain20")
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("schedule", "short"),
+        ("max_iterations", 63999),
+        ("batch_size", 64),
+        ("seed", 7),
+        ("learning_rate_milestones", [30000, 45000]),
+        ("learning_rates", [0.1, 0.02, 0.001]),
+    ],
+)
+def test_config_rejects_unfair_setting(
+    field: str,
+    bad_value: object,
+) -> None:
+    config = valid_config()
+    training = config["training"]
+    assert isinstance(training, dict)
+    training[field] = bad_value
+
+    with pytest.raises(ValueError, match=field):
+        validate_experiment_config(config, "plain20")

@@ -3,6 +3,8 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 
 REQUIRED_HISTORY_FIELDS = {
     "epoch",
@@ -16,6 +18,15 @@ REQUIRED_HISTORY_FIELDS = {
     "learning_rate",
     "elapsed_seconds",
     "best_test_accuracy",
+}
+
+EXPECTED_TRAINING = {
+    "schedule": "paper",
+    "max_iterations": 64000,
+    "learning_rate_milestones": [32000, 48000],
+    "learning_rates": [0.1, 0.01, 0.001],
+    "batch_size": 128,
+    "seed": 42,
 }
 
 
@@ -131,3 +142,48 @@ def load_history(path: str | Path) -> list[HistoryRow]:
     if not rows[-1].is_partial_epoch:
         raise ValueError("64000 iteration记录必须是最后部分epoch")
     return rows
+
+
+def load_config(path: str | Path) -> dict[str, object]:
+    """读取实验配置，并检查配置文件的基本结构。"""
+
+    resolved = Path(path)
+    if not resolved.is_file():
+        raise FileNotFoundError(f"config.yaml不存在：{resolved}")
+
+    with resolved.open(encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+
+    if not isinstance(config, dict):
+        raise ValueError("config.yaml根对象必须是字典")
+    for section in ("model", "training"):
+        if not isinstance(config.get(section), dict):
+            raise ValueError(f"config.yaml中的{section}必须是字典")
+    return config
+
+
+def validate_experiment_config(
+    config: dict[str, object],
+    expected_model: str,
+) -> None:
+    """确认实验模型与所有影响公平比较的训练设置完全一致。"""
+
+    model = config.get("model")
+    training = config.get("training")
+    if not isinstance(model, dict):
+        raise ValueError("config中的model必须是字典")
+    if not isinstance(training, dict):
+        raise ValueError("config中的training必须是字典")
+
+    actual_model = model.get("name")
+    if actual_model != expected_model:
+        raise ValueError(
+            f"model.name期望为{expected_model!r}，实际为{actual_model!r}"
+        )
+
+    for field, expected in EXPECTED_TRAINING.items():
+        actual = training.get(field)
+        if actual != expected:
+            raise ValueError(
+                f"training.{field}期望为{expected!r}，实际为{actual!r}"
+            )
