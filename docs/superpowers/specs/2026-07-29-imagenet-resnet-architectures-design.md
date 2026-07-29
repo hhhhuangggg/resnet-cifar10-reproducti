@@ -71,6 +71,11 @@ ResNet-18、34、50、101、152 网络结构，并使用 Torchvision 作为结�
 当 stride 不为 1，或输入通道与 block 输出通道不同，shortcut 使用
 `1x1 Conv + BN` projection；否则使用无参数 identity。
 
+阶段切换时遵循原始论文，将 stride 2 放在 Bottleneck 的第一个 `1x1`
+卷积。Torchvision 当前实现采用 ResNet v1.5 变体，把 stride 2 放在 `3x3`
+卷积；两者参数量相同，但下采样位置不同。Torchvision 在本阶段用于核对配置、
+输出形状和参数量，不覆盖论文优先的 stride 位置。
+
 ## 五种配置
 
 | 模型 | Block | 四阶段 block 数 |
