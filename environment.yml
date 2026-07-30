@@ -62,4 +62,3 @@ dependencies:
       - typing-extensions==4.15.0
       - tzdata==2026.3
       - werkzeug==3.1.8
-prefix: E:\Anaconda3\envs\resnet-paper
