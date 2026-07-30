@@ -265,8 +265,8 @@ model50 = resnet50(num_classes=1000)
 └─ requirements-lock.txt
 ```
 
-当前完整报告见[ResNet论文复现完整报告](docs/ResNet论文复现完整报告.md)；
-下一版将改为更精炼的项目专属结构。
+完整报告见[ResNet复现报告](docs/ResNet复现报告.md)。开发过程中的详细旧版材料仍
+保留在[ResNet论文复现完整报告](docs/ResNet论文复现完整报告.md)中。
 
 ## 九、当前边界
 

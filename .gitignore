@@ -21,6 +21,9 @@ runs/
 # 所有本地训练输出；可发布汇总位于analysis/results/
 outputs/
 
+# 本地生成的报告中间文件
+ResNet复现报告-飞书版-未清理.docx
+
 # 本地Codex辅助目录
 .agents/
 
