@@ -1,6 +1,7 @@
 """Static checks for a portable GitHub reproduction release."""
 
 from pathlib import Path
+import re
 
 import yaml
 
@@ -48,3 +49,44 @@ def test_gitignore_excludes_local_data_and_training_artifacts() -> None:
         ".pytest-tmp/",
     ):
         assert pattern in ignored
+
+
+def test_readme_describes_authorized_clean_clone_workflow() -> None:
+    readme = read_text("README.md")
+
+    required = (
+        "Private",
+        "git@github.com:hhhhuangggg/resnet-cifar10-reproducti.git",
+        "https://github.com/hhhhuangggg/resnet-cifar10-reproducti.git",
+        "conda env create -f environment.yml",
+        "torch.cuda.is_available()",
+        "python verify_reproduction.py",
+        "python -m pytest",
+        "--epochs 1",
+        "--epochs 5",
+        "--schedule paper",
+        "tensorboard --logdir runs",
+        "--include-imagenet",
+        "ImageNet",
+        "outputs/",
+        "runs/",
+    )
+    for text in required:
+        assert text in readme
+    assert r"E:\文档" not in readme
+    assert "ImageNet 结构验证不代表完成 ImageNet 训练" in readme
+
+
+def test_readme_relative_links_exist() -> None:
+    readme = read_text("README.md")
+    targets = re.findall(r"\[[^\]]+\]\(([^)]+)\)", readme)
+    relative_targets = [
+        target.split("#", 1)[0]
+        for target in targets
+        if target
+        and not target.startswith(("http://", "https://", "mailto:"))
+        and not target.startswith("#")
+    ]
+
+    assert relative_targets
+    assert all((ROOT / target).exists() for target in relative_targets)
