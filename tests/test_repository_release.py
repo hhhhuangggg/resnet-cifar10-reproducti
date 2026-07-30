@@ -92,33 +92,6 @@ def test_readme_relative_links_exist() -> None:
     assert all((ROOT / target).exists() for target in relative_targets)
 
 
-def test_project_report_has_project_specific_structure() -> None:
-    report = read_text("docs/ResNet复现报告.md")
-    headings = re.findall(r"^## (.+)$", report, flags=re.MULTILINE)
-
-    assert headings == [
-        "一、复现目标与学习收获",
-        "二、ResNet 核心原理",
-        "三、项目实现过程",
-        "四、实验环境与训练配置",
-        "五、实验结果",
-        "六、结果分析与论文对比",
-        "七、从私有 GitHub 仓库复现",
-        "八、局限性与后续工作",
-        "九、结论",
-    ]
-    for value in ("9.30%", "8.07%", "12.03%", "6.92%"):
-        assert value in report
-    assert "Private" in report
-    assert "只有仓库所有者和受邀协作者" in report
-    assert "DQN" not in report
-    assert "Breakout" not in report
-
-
-def test_project_report_relative_images_exist() -> None:
-    report_path = ROOT / "docs" / "ResNet复现报告.md"
-    report = report_path.read_text(encoding="utf-8")
-    image_targets = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", report)
-
-    assert len(image_targets) == 2
-    assert all((report_path.parent / target).exists() for target in image_targets)
+def test_private_material_directories_are_not_published() -> None:
+    assert not (ROOT / "docs").exists()
+    assert not (ROOT / "tools").exists()

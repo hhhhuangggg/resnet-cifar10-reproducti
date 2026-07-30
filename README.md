@@ -255,7 +255,6 @@ model50 = resnet50(num_classes=1000)
 │  ├─ compare_cifar_results.py
 │  └─ results/
 ├─ tests/
-├─ docs/
 ├─ data.py
 ├─ engine.py
 ├─ schedules.py
@@ -264,9 +263,6 @@ model50 = resnet50(num_classes=1000)
 ├─ environment.yml
 └─ requirements-lock.txt
 ```
-
-完整报告见[ResNet复现报告](docs/ResNet复现报告.md)。开发过程中的详细旧版材料仍
-保留在[ResNet论文复现完整报告](docs/ResNet论文复现完整报告.md)中。
 
 ## 九、当前边界
 
